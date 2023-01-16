@@ -1,0 +1,25 @@
+{
+  "me": {
+    "port": 5556,
+    "addr": "127.0.0.1",
+    "tls_config_info": {
+      "cert_path": "./server-cert.pem",
+      "key_path": "./server-key.pem",
+      "ca_cert_path": "./fs3-ca-cert.pem"
+    },
+    "ping": false
+  },
+  "retry_delay": 1000,
+  "servers": [
+    {
+      "port": 5554,
+      "addr": "127.0.0.1",
+      "server_name": "primary-fs3"
+    },
+    {
+      "port": 5555,
+      "addr": "127.0.0.1",
+      "server_name": "primary-fs3"
+    }
+  ]
+}
