@@ -1,10 +1,10 @@
 {
   "me": {
-    "port": 5555,
-    "addr": "127.0.0.1",
+    "id": "backup-fs3",
+    "addr": "127.0.0.1:5555",
     "tls_config_info": {
-      "cert_path": "./server-cert.pem",
-      "key_path": "./server-key.pem",
+      "cert_path": "./backup-cert.pem",
+      "key_path": "./backup-key.pem",
       "ca_cert_path": "./fs3-ca-cert.pem"
     },
     "ping": true
@@ -12,14 +12,14 @@
   "retry_delay": 1000,
   "servers": [
     {
-      "port": 5554,
-      "addr": "127.0.0.1",
+      "id": "server5554",
+      "addr": "127.0.0.1:5554",
       "server_name": "primary-fs3"
     },
     {
-      "port": 5556,
-      "addr": "127.0.0.1",
-      "server_name": "primary-fs3"
+      "id": "server5556",
+      "addr": "127.0.0.1:5556",
+      "server_name": "auth-fs3"
     }
   ]
 }

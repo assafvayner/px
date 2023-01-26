@@ -4,8 +4,8 @@ use std::{fs::File, path::Path};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServerInfo {
     pub addr: String,
-    pub port: u16,
     pub server_name: String,
+    pub id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -18,9 +18,9 @@ pub struct TlsConfigInfo {
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServerConfig {
     pub addr: String,
-    pub port: u16,
     pub tls_config_info: TlsConfigInfo,
     pub ping: bool,
+    pub id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

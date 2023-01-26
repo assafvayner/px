@@ -1,3 +1,4 @@
+use px::connection_manager::ConnectionManager;
 use s2n_quic::server::Server;
 use s2n_quic::stream::Result;
 use std::sync::Arc;
@@ -6,16 +7,16 @@ use tokio::sync::{mpsc, Mutex};
 
 use px::config::{Config, ServerConfig, TlsConfigInfo};
 
-use px::pingpong::Message;
+use px::messages::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::new(args());
     let ServerConfig {
         addr,
-        port,
         tls_config_info,
         ping,
+        id,
     } = config.me;
     let TlsConfigInfo {
         cert_path,
@@ -23,23 +24,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ca_cert_path,
     } = tls_config_info;
     unsafe {
-        px::ME = port;
+        px::ME = id;
     }
-    let server_address = format!("{}:{}", addr, port);
     let server = Server::builder()
         .with_tls((Path::new(&cert_path), Path::new(&key_path)))?
-        .with_io(&*server_address)?
+        .with_io(&*addr)?
         .start()?;
-    println!("started server\n{:?}", server);
 
     // multi sender 1 receiver channel
     let (tx, rx) = mpsc::unbounded_channel::<Message>();
     let tx = Arc::new(Mutex::new(tx));
 
-    tokio::spawn(px::handle_messages(rx));
+    let connection_manager = Arc::new(ConnectionManager::new());
+
+    tokio::spawn(px::handle_messages(connection_manager.clone(), rx));
 
     if ping && config.servers.len() > 0 {
         tokio::spawn(px::start_pingers(
+            connection_manager.clone(),
             config.servers,
             config.retry_delay,
             ca_cert_path,
@@ -47,5 +49,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ));
     }
 
-    px::serve(server, tx).await
+    px::serve(server, connection_manager, tx).await
 }
