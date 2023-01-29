@@ -1,10 +1,9 @@
-# run 3 ping ponging servers
+# run 2 ping ponging servers
 # kill with Ctrl+D
 
 cargo build
-./target/debug/px config/5554.json &
-./target/debug/px config/5555.json &
-./target/debug/px config/5556.json &
+./target/debug/px config/7000.json &
+./target/debug/px config/7001.json &
 
 while true; do
     line=''

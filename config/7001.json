@@ -1,7 +1,7 @@
 {
   "me": {
     "id": "backup-fs3",
-    "addr": "127.0.0.1:5555",
+    "addr": "127.0.0.1:7001",
     "tls_config_info": {
       "cert_path": "./backup-cert.pem",
       "key_path": "./backup-key.pem",
@@ -11,12 +11,8 @@
   "retry_delay": 1000,
   "servers": [
     {
-      "addr": "127.0.0.1:5554",
+      "addr": "127.0.0.1:7000",
       "server_name": "primary-fs3"
-    },
-    {
-      "addr": "127.0.0.1:5556",
-      "server_name": "auth-fs3"
     }
   ]
 }

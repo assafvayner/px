@@ -5,7 +5,6 @@ use std::{fs::File, path::Path};
 pub struct ServerInfo {
     pub addr: String,
     pub server_name: String,
-    pub id: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -19,7 +18,6 @@ pub struct TlsConfigInfo {
 pub struct ServerConfig {
     pub addr: String,
     pub tls_config_info: TlsConfigInfo,
-    pub ping: bool,
     pub id: String,
 }
 

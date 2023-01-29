@@ -1,4 +1,6 @@
+use px::app::App;
 use px::connection_manager::ConnectionManager;
+use px::APP;
 use s2n_quic::server::Server;
 use s2n_quic::stream::Result;
 use std::sync::Arc;
@@ -15,7 +17,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let ServerConfig {
         addr,
         tls_config_info,
-        ping,
         id,
     } = config.me;
     let TlsConfigInfo {
@@ -23,6 +24,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         key_path,
         ca_cert_path,
     } = tls_config_info;
+
+    // set global ME var
     unsafe {
         px::ME = id;
     }
@@ -37,17 +40,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let connection_manager = Arc::new(ConnectionManager::new());
 
+    APP.lock().await.initialize(&connection_manager);
+
     tokio::spawn(px::handle_messages(connection_manager.clone(), rx));
 
-    if ping && config.servers.len() > 0 {
-        tokio::spawn(px::start_pingers(
-            connection_manager.clone(),
-            config.servers,
-            config.retry_delay,
-            ca_cert_path,
-            tx.clone(),
-        ));
-    }
+    tokio::spawn(px::start_pingers(
+        connection_manager.clone(),
+        config.servers,
+        config.retry_delay,
+        ca_cert_path,
+    ));
 
-    px::serve(server, connection_manager, tx).await
+    // connection_manager
+    px::serve(server, tx).await
 }

@@ -1,7 +1,7 @@
-use std::time::Duration;
+use std::{time::Duration, sync::Arc};
 
 
-use crate::messages::{Message, MessageContent};
+use crate::{messages::{Message, MessageContent}, connection_manager::ConnectionManager};
 
 pub mod pingpong;
 
@@ -15,6 +15,7 @@ pub enum AppType {
 
 pub trait App {
     fn new() -> Self;
+    fn initialize(&mut self, cm: &Arc<ConnectionManager>);
     fn handles(message: &MessageContent) -> bool;
     fn handle(&mut self, message: &Message) -> AppResult;
 }

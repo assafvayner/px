@@ -1,17 +1,18 @@
-use app::{
-    pingpong::{Ping, PingPongApp},
-    App,
-};
-use bytes::Bytes;
+use app::{pingpong::PingPongApp, App};
+use bytes::{BufMut, Bytes, BytesMut};
 use config::ServerInfo;
-use connection_manager::{
-    handle_connection, listen_and_forward, send, send_owns, ConnectionManager,
-};
+use connection_manager::ConnectionManager;
 use messages::{Message, MessageContent};
 use once_cell::sync::Lazy;
-use s2n_quic::{client::Connect, Client, Server};
-use std::{error::Error, net::SocketAddr, path::Path, sync::Arc, time::Duration};
-use timer::timer_async;
+use s2n_quic::{client::Connect, stream::ReceiveStream, Client, Connection, Server};
+use std::{
+    error::Error,
+    net::SocketAddr,
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
+use timer::timer;
 use tokio::{
     join,
     sync::{
@@ -27,8 +28,15 @@ pub mod connection_manager;
 pub mod messages;
 pub mod timer;
 
-pub static APP: Lazy<Arc<Mutex<PingPongApp>>> =
-    Lazy::new(|| Arc::new(Mutex::new(PingPongApp::new())));
+// TODO: handle connection re-establishment
+// TODO: pull functions into different modules, try to simplify linkages
+// TODO: get rid as much as possible of static vars (DI?)
+// TODO: eliminate unsafe
+
+// "messages" on stream are separated by delimiter
+static DELIMITER: u8 = 0x0d; // '\r'
+
+pub static APP: Lazy<Mutex<PingPongApp>> = Lazy::new(|| Mutex::new(PingPongApp::new()));
 
 pub static mut ME: String = String::new();
 
@@ -42,37 +50,41 @@ pub async fn handle_messages(cm: Arc<ConnectionManager>, mut rx: UnboundedReceiv
     while let Some(message) = rx.recv().await {
         let Message { content, .. } = &message;
         if !PingPongApp::handles(content) {
-            eprintln!("{}: ** unhandled ** {:?}", me(), &message);
+            println_safe(format!("{}: ** unhandled ** {:?}", me(), &message));
             continue;
         }
         let result = APP.lock().await.handle(&message);
         if let Err(e) = result {
-            eprintln!("{}: {}", me(), e);
+            println_safe(format!("{}: {}", me(), e));
             continue;
         }
         let result = result.unwrap();
+
+        // handle app result
         if let None = result {
+            // nothing to send
             continue;
         }
         let (out_message, delay) = result.unwrap();
         if let None = delay {
+            // send immediately
             send(cm.clone(), &out_message).await;
             continue;
         }
+        // send with delay
         let delay = delay.unwrap();
-        timer_async(send_owns(cm.clone(), out_message), delay);
+        timer(send_owns(cm.clone(), out_message), delay);
     }
 }
 
 pub async fn serve(
     mut server: Server,
-    cm: Arc<ConnectionManager>,
     tx: Arc<Mutex<UnboundedSender<Message>>>,
 ) -> Result<(), Box<dyn Error>> {
     let mut handles: Vec<JoinHandle<()>> = Vec::new();
 
     while let Some(connection) = server.accept().await {
-        let handle = tokio::spawn(handle_connection(cm.clone(), connection, tx.clone()));
+        let handle = tokio::spawn(handle_connection(connection, tx.clone()));
         handles.push(handle);
     }
 
@@ -81,6 +93,110 @@ pub async fn serve(
     eprintln!("{}: closing server", me());
 
     Ok(())
+}
+
+pub async fn handle_connection(
+    mut connection: Connection,
+    tx: Arc<Mutex<UnboundedSender<Message>>>,
+) {
+    let mut handles: Vec<JoinHandle<()>> = Vec::new();
+    while let Ok(Some(stream)) = connection.accept_receive_stream().await {
+        let handle = tokio::spawn(listen_and_forward(stream, tx.clone()));
+        handles.push(handle);
+    }
+
+    join_handles(handles).await;
+}
+
+fn index_first_byte_equals<'a, T>(bytes: T, value: u8) -> Option<usize>
+where
+    T: IntoIterator<Item = &'a u8>, // Bytes/BytesMut
+{
+    let mut i: usize = 0;
+    for byte in bytes {
+        if *byte == value {
+            return Some(i);
+        }
+        i += 1;
+    }
+    return None;
+}
+
+pub async fn listen_and_forward(
+    mut stream_receive: ReceiveStream,
+    tx: Arc<Mutex<UnboundedSender<Message>>>,
+) {
+    let mut buf = BytesMut::new();
+    while let Ok(data_option) = &stream_receive.receive().await {
+        if let None = data_option {
+            continue;
+        }
+        let data = data_option.as_ref().unwrap();
+        if buf.is_empty() {
+            // TODO: eliminiate this horrendous nested conditionals, it's giving me a headache
+            if let Some(idx) = index_first_byte_equals(data, DELIMITER) {
+                if idx == data.len() - 1 {
+                    if let Some(x) = data.strip_suffix(&[DELIMITER]) {
+                        let message = parse(x);
+                        if let MessageContent::Invalid = message.content {
+                            continue;
+                        }
+                        tx.lock().await.send(message).unwrap();
+                        continue;
+                    }
+                }
+            }
+        }
+        buf.extend(data);
+        while let Some(delim_index) = index_first_byte_equals(&buf, DELIMITER) {
+            if delim_index == 0 {
+                // not using the return buf;
+                drop(buf.split_to(1));
+                continue;
+            }
+            let data = buf.split_to(delim_index + 1);
+            if let Some(x) = data.strip_suffix(&[DELIMITER]) {
+                let message = parse(x);
+                if let MessageContent::Invalid = message.content {
+                    continue;
+                }
+                tx.lock().await.send(message).unwrap();
+                continue;
+            } else {
+                println_safe(format!("error in exp {:?}", data));
+            }
+        }
+    }
+    println_safe("exiting listen forward");
+}
+
+pub async fn send(cm: Arc<ConnectionManager>, message: &Message) {
+    let data = serde_json::to_string(message);
+    if let Err(_) = data {
+        // parse error
+        return;
+    }
+    let message_bytes = Bytes::from(data.unwrap());
+
+    let mut mmb = BytesMut::with_capacity(message_bytes.len() + 1);
+    mmb.put(message_bytes);
+    mmb.put_u8(DELIMITER);
+
+    let stream = cm.get_stream(&message.to).await;
+    if let Err(_) = stream {
+        // error case
+        return;
+    }
+    let stream = stream.unwrap();
+    let mut stream = stream.lock().await;
+    // stream.send(message_bytes).await.unwrap();
+    // stream.send(Bytes::from("\r")).await.unwrap();
+    stream.send(mmb.freeze()).await.unwrap();
+    // stream.send(mmb.into()).await.unwrap();
+}
+
+pub async fn send_owns(cm: Arc<ConnectionManager>, message: Message) {
+    send(cm, &message).await;
 }
 
 async fn join_handles(handles: Vec<JoinHandle<()>>) {
@@ -92,7 +208,7 @@ async fn join_handles(handles: Vec<JoinHandle<()>>) {
     }
 }
 
-fn parse(data: &Bytes) -> Message {
+fn parse(data: &[u8]) -> Message {
     let json_parse_result: Result<Message, serde_json::Error> = serde_json::from_slice(&data);
     if let Err(x) = &json_parse_result {
         eprintln!("{:?}, {:?}", x, data);
@@ -115,8 +231,34 @@ pub async fn start_pingers(
     servers: Vec<ServerInfo>,
     retry_delay: u32,
     ca_cert_path: String,
-    tx: Arc<Mutex<UnboundedSender<Message>>>,
 ) {
+    for server_info in servers {
+        tokio::spawn(ping_server(
+            cm.clone(),
+            ca_cert_path.clone(),
+            server_info,
+            retry_delay,
+        ));
+    }
+}
+
+async fn ping_server(
+    cm: Arc<ConnectionManager>,
+    ca_cert_path: String,
+    server_info: ServerInfo,
+    retry_delay: u32,
+) {
+    let ServerInfo {
+        addr, server_name, ..
+    } = server_info;
+    println_safe(format!("ping server {}", &server_name));
+
+    if cm.has_stream(&server_name).await {
+        eprintln!("case 1");
+        init_ping(&server_name).await;
+        return;
+    }
+
     let client = Client::builder()
         .with_tls(Path::new(&ca_cert_path))
         .unwrap()
@@ -124,37 +266,10 @@ pub async fn start_pingers(
         .unwrap()
         .start()
         .unwrap();
-    let client_ptr = Arc::new(Mutex::new(client));
-    for server_info in servers {
-        tokio::spawn(ping_server(
-            cm.clone(),
-            client_ptr.clone(),
-            server_info,
-            retry_delay,
-            tx.clone(),
-        ));
-    }
-}
-
-async fn ping_server(
-    cm: Arc<ConnectionManager>,
-    client: Arc<Mutex<Client>>,
-    server_info: ServerInfo,
-    retry_delay: u32,
-    tx: Arc<Mutex<UnboundedSender<Message>>>,
-) {
-    let ServerInfo {
-        addr, server_name, ..
-    } = server_info;
-
-    if cm.has_stream(&server_name).await {
-        init_ping(cm, &server_name).await;
-        return;
-    }
 
     let server_addr: SocketAddr = addr.parse().unwrap();
     let connect_config = Connect::new(server_addr).with_server_name(server_name.clone());
-    let mut connection = client.lock().await.connect(connect_config.clone()).await;
+    let mut connection = client.connect(connect_config.clone()).await;
     let mut expo_factor: u64 = 1;
     while let Err(_) = connection {
         eprintln!(
@@ -165,69 +280,61 @@ async fn ping_server(
         );
         // if failed because has it, just send
         if cm.has_stream(&server_name).await {
-            init_ping(cm, &server_name).await;
+            eprintln!("case 2");
+            init_ping(&server_name).await;
             return;
         }
         let delay: u64 = expo_factor * u64::from(retry_delay);
         expo_factor <<= 1; // double
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        connection = client.lock().await.connect(connect_config.clone()).await;
+        connection = client.connect(connect_config.clone()).await;
     }
     let mut connection = connection.unwrap();
 
     connection.keep_alive(true).unwrap();
 
-    let mut stream = connection.open_bidirectional_stream().await;
+    let mut stream = connection.open_send_stream().await;
     expo_factor = 1;
     while let Err(_) = stream {
         eprintln!("{}: failed to make a stream to {}\n{:?}", me(), addr, *cm);
         let delay: u64 = expo_factor * u64::from(retry_delay);
         expo_factor <<= 1; // double
         tokio::time::sleep(Duration::from_millis(delay)).await;
-        stream = connection.open_bidirectional_stream().await;
+        stream = connection.open_send_stream().await;
     }
     let stream = stream.unwrap();
-    let (stream_receive, stream_send) = stream.split();
 
-    let res = cm.add_stream(&server_name, stream_send).await;
+    let res = cm.add_stream(&server_name, stream).await;
     if let Err(e) = res {
         eprintln!("{} readd stream {:?}", me(), e)
     }
 
-    println!("{} listening to {} as client", me(), server_name);
-
-    tokio::spawn(listen_and_forward(
-        cm.clone(),
-        stream_receive,
-        tx,
-        server_name.clone(),
-    ));
-
-    init_ping(cm, &server_name).await;
+    init_ping(&server_name).await;
 }
 
-async fn init_ping(cm: Arc<ConnectionManager>, server_name: &String) {
-    let msg = format!("initial ping from {} to {}", me(), server_name);
-    let ping = Ping::new(1, msg);
-    let content = MessageContent::Ping(ping);
-    let message = Message {
-        to: server_name.clone(),
-        from: me().clone(),
-        content,
-    };
-
-    let init_status = APP.lock().await.init_pinger(&server_name);
+#[inline]
+async fn init_ping(server_name: &String) {
+    let init_status = APP.lock().await.init_pinger(&server_name).await;
     if let Err(op_sid) = init_status {
         eprintln!("init pinger failed, op: {:?}", op_sid);
         return;
     }
+}
 
-    println!(
-        "{} sending first ping from {} to {}",
-        me(),
-        message.from,
-        message.to
+pub(crate) fn println_safe<'a, T>(what: T)
+where
+    T: std::fmt::Display,
+{
+    eprint!(
+        "{}",
+        format!(
+            "{:?} {}: {}\n",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_micros(),
+            me(),
+            what
+        )
     );
-
-    send(cm, &message).await;
 }

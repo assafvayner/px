@@ -1,17 +1,28 @@
 use std::{
+    cell::RefCell,
     cmp::Ordering,
     collections::{hash_map::Entry, HashMap},
+    sync::Arc,
     time::Duration,
 };
+
+use async_recursion::async_recursion;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    connection_manager::ConnectionManager,
     me,
     messages::{Message, MessageContent},
+    println_safe, send,
+    timer::timer,
+    APP,
 };
 
 use super::{App, AppError, AppResult};
+
+static PING_DELAY: u64 = 5;
+static CHECK_DELAY: u64 = 6;
 
 #[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct Ping {
@@ -42,38 +53,57 @@ impl Pong {
 
 pub struct PingPongApp {
     pinging: HashMap<String, u64>,
+    pub cm: RefCell<Option<Arc<ConnectionManager>>>,
 }
 
 impl PingPongApp {
-    pub fn init_pinger(&mut self, to: &String) -> Result<(), String> {
+    pub async fn init_pinger(&mut self, to: &String) -> Result<(), String> {
         match self.pinging.entry(to.clone()) {
-            Entry::Occupied(o) => Err(o.key().clone()),
+            Entry::Occupied(o) => return Err(o.key().clone()),
             Entry::Vacant(v) => {
                 v.insert(1);
-                Ok(())
             }
         }
+        // send ping from here?
+        let ping = Ping {
+            seqnum: 1,
+            message: String::from(format!("{} init ping 1", me())),
+        };
+        let message = Message::new(me().clone(), to.clone(), MessageContent::Ping(ping));
+
+        // send message if can
+        if let Some(cm) = self.cm.get_mut() {
+            send(cm.clone(), &message).await;
+        } else {
+            println_safe(format!("failed to send {:?}", &message));
+        }
+
+        timer(
+            check_ping_replied(message.clone()),
+            Duration::from_secs(CHECK_DELAY),
+        );
+        Ok(())
     }
 
     fn process_ping(&mut self, from: &String, ping: &Ping) -> AppResult {
         let Ping { seqnum, .. } = ping;
-        println!("{} proc ping ({:?}), seq: {}", me(), from, seqnum);
+        println_safe(format!("proc {:?}", ping));
+        let pong = Pong::new(
+            *seqnum,
+            String::from(format!("pong seq: {} from: {} to: {}", *seqnum, me(), from)),
+        );
         let message = Message {
             from: me().clone(),
             to: from.clone(),
-            content: MessageContent::Pong(Pong {
-                seqnum: *seqnum,
-                message: String::from(""),
-            }),
+            content: MessageContent::Pong(pong),
         };
-        let delay = None;
-        println!("{} sending out {:?}", me(), message);
-        Ok(Some((message, delay)))
+
+        Ok(Some((message, None)))
     }
 
     fn process_pong(&mut self, from: &String, pong: &Pong) -> AppResult {
+        println_safe(format!("proc {:?}", pong));
         let Pong { seqnum, .. } = pong;
-        println!("{} proc pong ({:?}), seq: {}", me(), from, seqnum);
         let entry = self.pinging.entry(from.clone());
         match entry {
             Entry::Vacant(_) => {
@@ -108,10 +138,12 @@ impl PingPongApp {
             }
         }
 
-        let next_ping = Ping {
-            seqnum: seqnum + 1,
-            message: String::from(""),
-        };
+        let seqnum = seqnum + 1;
+
+        let next_ping = Ping::new(
+            seqnum,
+            String::from(format!("ping seq: {} from: {} to: {}", seqnum, me(), from)),
+        );
 
         let content = MessageContent::Ping(next_ping);
         let message = Message {
@@ -120,17 +152,56 @@ impl PingPongApp {
             content,
         };
 
-        println!("{} sending out {:?}", me(), message);
-        let delay = Some(Duration::from_secs(10));
+        timer(
+            check_ping_replied(message.clone()),
+            Duration::from_secs(CHECK_DELAY),
+        );
+
+        let delay = Some(Duration::from_secs(PING_DELAY));
         Ok(Some((message, delay)))
     }
+}
+
+#[async_recursion]
+async fn check_ping_replied(message: Message) {
+    let ping = match &message.content {
+        MessageContent::Ping(ping) => ping,
+        _ => {
+            return;
+        }
+    };
+    let mut ping_pong_app = APP.lock().await;
+    let current_seqnum = ping_pong_app.pinging.get(&message.to).unwrap();
+    if *current_seqnum > ping.seqnum {
+        // good case already logged pong
+        return;
+    }
+
+    println_safe(format!(
+        "failed to receive pong for seq: {} from {}",
+        ping.seqnum, message.to
+    ));
+    if let Some(cm) = ping_pong_app.cm.get_mut() {
+        send(cm.clone(), &message).await;
+    } else {
+        println_safe(format!("failed to send {:?}", &message));
+    }
+    timer(
+        check_ping_replied(message),
+        Duration::from_secs(CHECK_DELAY),
+    );
 }
 
 impl App for PingPongApp {
     fn new() -> Self {
         PingPongApp {
             pinging: HashMap::new(),
+            cm: RefCell::new(None),
         }
+    }
+
+    fn initialize(&mut self, cm: &Arc<ConnectionManager>) {
+        self.cm.replace(Some(cm.clone()));
     }
 
     fn handles(message_content: &MessageContent) -> bool {

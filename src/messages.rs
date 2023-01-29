@@ -31,8 +31,3 @@ impl Message {
         Message { from, to, content }
     }
 }
-
-#[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
-pub struct WhoAmINotification {
-    pub server_id: String,
-}

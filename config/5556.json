@@ -6,18 +6,15 @@
       "cert_path": "./auth-cert.pem",
       "key_path": "./auth-key.pem",
       "ca_cert_path": "./fs3-ca-cert.pem"
-    },
-    "ping": true
+    }
   },
   "retry_delay": 1000,
   "servers": [
     {
-      "id": "server5554",
       "addr": "127.0.0.1:5554",
       "server_name": "primary-fs3"
     },
     {
-      "id": "server5555",
       "addr": "127.0.0.1:5555",
       "server_name": "backup-fs3"
     }
