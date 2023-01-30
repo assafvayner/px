@@ -21,8 +21,8 @@ use crate::{
 
 use super::{App, AppError, AppResult};
 
-static PING_DELAY: u64 = 5;
-static CHECK_DELAY: u64 = 6;
+static PING_DELAY: u64 = 2000;
+static CHECK_DELAY: u64 = 2500;
 
 #[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct Ping {
@@ -80,7 +80,7 @@ impl PingPongApp {
 
         timer(
             check_ping_replied(message.clone()),
-            Duration::from_secs(CHECK_DELAY),
+            Duration::from_millis(CHECK_DELAY),
         );
         Ok(())
     }
@@ -154,10 +154,10 @@ impl PingPongApp {
 
         timer(
             check_ping_replied(message.clone()),
-            Duration::from_secs(CHECK_DELAY),
+            Duration::from_millis(CHECK_DELAY),
         );
 
-        let delay = Some(Duration::from_secs(PING_DELAY));
+        let delay = Some(Duration::from_millis(PING_DELAY));
         Ok(Some((message, delay)))
     }
 }
@@ -188,7 +188,7 @@ async fn check_ping_replied(message: Message) {
     }
     timer(
         check_ping_replied(message),
-        Duration::from_secs(CHECK_DELAY),
+        Duration::from_millis(CHECK_DELAY),
     );
 }
 

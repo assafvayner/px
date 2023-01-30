@@ -1,11 +1,13 @@
 use app::{pingpong::PingPongApp, App};
 use bytes::{BufMut, Bytes, BytesMut};
-use config::ServerInfo;
+use config::{Config, ServerInfo};
 use connection_manager::ConnectionManager;
-use messages::{Message, MessageContent};
+use message_parser::MessageParser;
+use messages::Message;
 use once_cell::sync::Lazy;
 use s2n_quic::{client::Connect, stream::ReceiveStream, Client, Connection, Server};
 use std::{
+    env::args,
     error::Error,
     net::SocketAddr,
     path::Path,
@@ -13,18 +15,15 @@ use std::{
     time::{Duration, SystemTime},
 };
 use timer::timer;
-use tokio::{
-    join,
-    sync::{
-        mpsc::{UnboundedReceiver, UnboundedSender},
-        Mutex,
-    },
-    task::JoinHandle,
+use tokio::sync::{
+    mpsc::{UnboundedReceiver, UnboundedSender},
+    Mutex,
 };
 
 pub mod app;
 pub mod config;
 pub mod connection_manager;
+pub mod message_parser;
 pub mod messages;
 pub mod timer;
 
@@ -38,12 +37,14 @@ static DELIMITER: u8 = 0x0d; // '\r'
 
 pub static APP: Lazy<Mutex<PingPongApp>> = Lazy::new(|| Mutex::new(PingPongApp::new()));
 
-pub static mut ME: String = String::new();
+pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new(args()));
+
+pub static ME: Lazy<&'static String> = Lazy::new(|| &CONFIG.me.id);
 
 pub fn me() -> &'static String {
-    unsafe {
-        return &ME;
-    };
+    // unsafe {
+    return &ME;
+    // };
 }
 
 pub async fn handle_messages(cm: Arc<ConnectionManager>, mut rx: UnboundedReceiver<Message>) {
@@ -81,17 +82,10 @@ pub async fn serve(
     mut server: Server,
     tx: Arc<Mutex<UnboundedSender<Message>>>,
 ) -> Result<(), Box<dyn Error>> {
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
-
     while let Some(connection) = server.accept().await {
-        let handle = tokio::spawn(handle_connection(connection, tx.clone()));
-        handles.push(handle);
+        tokio::spawn(handle_connection(connection, tx.clone()));
     }
-
-    join_handles(handles).await;
-
     eprintln!("{}: closing server", me());
-
     Ok(())
 }
 
@@ -99,78 +93,38 @@ pub async fn handle_connection(
     mut connection: Connection,
     tx: Arc<Mutex<UnboundedSender<Message>>>,
 ) {
-    let mut handles: Vec<JoinHandle<()>> = Vec::new();
     while let Ok(Some(stream)) = connection.accept_receive_stream().await {
-        let handle = tokio::spawn(listen_and_forward(stream, tx.clone()));
-        handles.push(handle);
+        listen_and_forward(stream, &tx).await;
+        // listen and forward only completes on stream close, only allow 1 stream per connection
+        // will only accept another stream after previous stream close.
     }
-
-    join_handles(handles).await;
 }
 
-fn index_first_byte_equals<'a, T>(bytes: T, value: u8) -> Option<usize>
-where
-    T: IntoIterator<Item = &'a u8>, // Bytes/BytesMut
-{
-    let mut i: usize = 0;
-    for byte in bytes {
-        if *byte == value {
-            return Some(i);
-        }
-        i += 1;
-    }
-    return None;
-}
-
-pub async fn listen_and_forward(
+async fn listen_and_forward(
     mut stream_receive: ReceiveStream,
-    tx: Arc<Mutex<UnboundedSender<Message>>>,
+    tx: &Mutex<UnboundedSender<Message>>,
 ) {
-    let mut buf = BytesMut::new();
-    while let Ok(data_option) = &stream_receive.receive().await {
-        if let None = data_option {
-            continue;
-        }
-        let data = data_option.as_ref().unwrap();
-        if buf.is_empty() {
-            // TODO: eliminiate this horrendous nested conditionals, it's giving me a headache
-            if let Some(idx) = index_first_byte_equals(data, DELIMITER) {
-                if idx == data.len() - 1 {
-                    if let Some(x) = data.strip_suffix(&[DELIMITER]) {
-                        let message = parse(x);
-                        if let MessageContent::Invalid = message.content {
-                            continue;
-                        }
-                        tx.lock().await.send(message).unwrap();
-                        continue;
-                    }
-                }
-            }
-        }
-        buf.extend(data);
-        while let Some(delim_index) = index_first_byte_equals(&buf, DELIMITER) {
-            if delim_index == 0 {
-                // not using the return buf;
-                drop(buf.split_to(1));
-                continue;
-            }
-            let data = buf.split_to(delim_index + 1);
-            if let Some(x) = data.strip_suffix(&[DELIMITER]) {
-                let message = parse(x);
-                if let MessageContent::Invalid = message.content {
-                    continue;
-                }
-                tx.lock().await.send(message).unwrap();
-                continue;
-            } else {
-                println_safe(format!("error in exp {:?}", data));
-            }
-        }
+    let mut parser = MessageParser::new();
+    while let Ok(Some(data)) = stream_receive.receive().await {
+        parser.append_data(&data);
+        forward(&mut parser, tx).await;
     }
-    println_safe("exiting listen forward");
+    // end loop, stream closed (error or Ok(None) from stream.receive())
 }
 
-pub async fn send(cm: Arc<ConnectionManager>, message: &Message) {
+#[inline]
+async fn forward<T>(parser: &mut T, tx: &Mutex<UnboundedSender<Message>>)
+where
+    T: Iterator<Item = Message>,
+{
+    for message in parser {
+        if let Err(e) = tx.lock().await.send(message) {
+            println_safe(format!("forward error: {}", e));
+        }
+    }
+}
+
+pub(crate) async fn send(cm: Arc<ConnectionManager>, message: &Message) {
     let data = serde_json::to_string(message);
     if let Err(_) = data {
         // parse error
@@ -189,64 +143,34 @@ pub async fn send(cm: Arc<ConnectionManager>, message: &Message) {
     }
     let stream = stream.unwrap();
     let mut stream = stream.lock().await;
-    // stream.send(message_bytes).await.unwrap();
-    // stream.send(Bytes::from("\r")).await.unwrap();
     stream.send(mmb.freeze()).await.unwrap();
-    // stream.send(mmb.into()).await.unwrap();
 }
 
-pub async fn send_owns(cm: Arc<ConnectionManager>, message: Message) {
+pub(crate) async fn send_owns(cm: Arc<ConnectionManager>, message: Message) {
     send(cm, &message).await;
-}
-
-async fn join_handles(handles: Vec<JoinHandle<()>>) {
-    for handle in handles {
-        let res = join!(handle);
-        if let Err(e) = res.0 {
-            eprintln!("{:?}", e);
-        }
-    }
-}
-
-fn parse(data: &[u8]) -> Message {
-    let json_parse_result: Result<Message, serde_json::Error> = serde_json::from_slice(&data);
-    if let Err(x) = &json_parse_result {
-        eprintln!("{:?}, {:?}", x, data);
-    }
-    if let Ok(msg) = json_parse_result {
-        return msg;
-    }
-    eprintln!("******************");
-    eprintln!("INVALID: {:?}", data);
-    eprintln!("******************");
-    Message {
-        content: MessageContent::Invalid,
-        from: String::from(""),
-        to: String::from(""),
-    }
 }
 
 pub async fn start_pingers(
     cm: Arc<ConnectionManager>,
-    servers: Vec<ServerInfo>,
-    retry_delay: u32,
-    ca_cert_path: String,
+    // servers: Vec<ServerInfo>,
+    // retry_delay: u32,
+    // ca_cert_path: &'static String,
 ) {
-    for server_info in servers {
+    for server_info in &CONFIG.servers {
         tokio::spawn(ping_server(
             cm.clone(),
-            ca_cert_path.clone(),
+            // ca_cert_path,
             server_info,
-            retry_delay,
+            // retry_delay,
         ));
     }
 }
 
 async fn ping_server(
     cm: Arc<ConnectionManager>,
-    ca_cert_path: String,
-    server_info: ServerInfo,
-    retry_delay: u32,
+    // ca_cert_path: &'static String,
+    server_info: &ServerInfo,
+    // retry_delay: u32,
 ) {
     let ServerInfo {
         addr, server_name, ..
@@ -259,8 +183,11 @@ async fn ping_server(
         return;
     }
 
+    let ca_cert_path = &CONFIG.me.tls_config_info.ca_cert_path;
+    let retry_delay = CONFIG.retry_delay;
+
     let client = Client::builder()
-        .with_tls(Path::new(&ca_cert_path))
+        .with_tls(Path::new(ca_cert_path))
         .unwrap()
         .with_io("127.0.0.1:0")
         .unwrap()
