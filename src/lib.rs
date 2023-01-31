@@ -5,15 +5,8 @@ use connection_manager::ConnectionManager;
 use message_parser::MessageParser;
 use messages::Message;
 use once_cell::sync::Lazy;
-use s2n_quic::{client::Connect, stream::ReceiveStream, Client, Connection, Server};
-use std::{
-    env::args,
-    error::Error,
-    net::SocketAddr,
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use s2n_quic::{stream::ReceiveStream, Connection, Server};
+use std::{env::args, error::Error, sync::Arc, time::SystemTime};
 use timer::timer;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
@@ -27,35 +20,36 @@ pub mod message_parser;
 pub mod messages;
 pub mod timer;
 
-// TODO: handle connection re-establishment
 // TODO: pull functions into different modules, try to simplify linkages
-// TODO: get rid as much as possible of static vars (DI?)
-// TODO: eliminate unsafe
 
 // "messages" on stream are separated by delimiter
 static DELIMITER: u8 = 0x0d; // '\r'
 
+#[cfg(feature = "pingpong")]
 pub static APP: Lazy<Mutex<PingPongApp>> = Lazy::new(|| Mutex::new(PingPongApp::new()));
 
 pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new(args()));
 
 pub static ME: Lazy<&'static String> = Lazy::new(|| &CONFIG.me.id);
 
+pub static CM: Lazy<ConnectionManager> = Lazy::new(|| ConnectionManager::new());
+
+/// helper to get reference to ME string
 pub fn me() -> &'static String {
-    // unsafe {
     return &ME;
-    // };
 }
 
-pub async fn handle_messages(cm: Arc<ConnectionManager>, mut rx: UnboundedReceiver<Message>) {
+pub async fn handle_messages(mut rx: UnboundedReceiver<Message>) {
     while let Some(message) = rx.recv().await {
         let Message { content, .. } = &message;
         if !PingPongApp::handles(content) {
+            #[cfg(debug_assertions)]
             println_safe(format!("{}: ** unhandled ** {:?}", me(), &message));
             continue;
         }
         let result = APP.lock().await.handle(&message);
         if let Err(e) = result {
+            #[cfg(debug_assertions)]
             println_safe(format!("{}: {}", me(), e));
             continue;
         }
@@ -69,12 +63,12 @@ pub async fn handle_messages(cm: Arc<ConnectionManager>, mut rx: UnboundedReceiv
         let (out_message, delay) = result.unwrap();
         if let None = delay {
             // send immediately
-            send(cm.clone(), &out_message).await;
+            send(&out_message).await;
             continue;
         }
         // send with delay
         let delay = delay.unwrap();
-        timer(send_owns(cm.clone(), out_message), delay);
+        timer(send_owns(out_message), delay);
     }
 }
 
@@ -85,7 +79,8 @@ pub async fn serve(
     while let Some(connection) = server.accept().await {
         tokio::spawn(handle_connection(connection, tx.clone()));
     }
-    eprintln!("{}: closing server", me());
+    #[cfg(debug_assertions)]
+    println_safe(format!("{}: closing server", me()));
     Ok(())
 }
 
@@ -119,12 +114,13 @@ where
 {
     for message in parser {
         if let Err(e) = tx.lock().await.send(message) {
+            #[cfg(debug_assertions)]
             println_safe(format!("forward error: {}", e));
         }
     }
 }
 
-pub(crate) async fn send(cm: Arc<ConnectionManager>, message: &Message) {
+pub(crate) async fn send(message: &Message) {
     let data = serde_json::to_string(message);
     if let Err(_) = data {
         // parse error
@@ -136,7 +132,7 @@ pub(crate) async fn send(cm: Arc<ConnectionManager>, message: &Message) {
     mmb.put(message_bytes);
     mmb.put_u8(DELIMITER);
 
-    let stream = cm.get_stream(&message.to).await;
+    let stream = CM.get_stream(&message.to).await;
     if let Err(_) = stream {
         // error case
         return;
@@ -146,106 +142,39 @@ pub(crate) async fn send(cm: Arc<ConnectionManager>, message: &Message) {
     stream.send(mmb.freeze()).await.unwrap();
 }
 
-pub(crate) async fn send_owns(cm: Arc<ConnectionManager>, message: Message) {
-    send(cm, &message).await;
+pub(crate) async fn send_owns(message: Message) {
+    send(&message).await;
 }
 
-pub async fn start_pingers(
-    cm: Arc<ConnectionManager>,
-    // servers: Vec<ServerInfo>,
-    // retry_delay: u32,
-    // ca_cert_path: &'static String,
-) {
+pub async fn start_send_streams() {
+    let ca_cert_path = &CONFIG.me.tls_config_info.ca_cert_path;
+    let retry_delay = CONFIG.retry_delay;
+
+    #[cfg(feature = "pingpong")]
+    let on_connection_success = init_ping;
+
+    #[cfg(feature = "paxos")]
+    let on_connection_success = todo!();
+
     for server_info in &CONFIG.servers {
-        tokio::spawn(ping_server(
-            cm.clone(),
-            // ca_cert_path,
-            server_info,
-            // retry_delay,
+        let ServerInfo {
+            addr, server_name, ..
+        } = server_info;
+
+        tokio::spawn(CM.init_sender(
+            addr,
+            server_name,
+            ca_cert_path,
+            retry_delay.into(),
+            on_connection_success,
         ));
     }
 }
 
-async fn ping_server(
-    cm: Arc<ConnectionManager>,
-    // ca_cert_path: &'static String,
-    server_info: &ServerInfo,
-    // retry_delay: u32,
-) {
-    let ServerInfo {
-        addr, server_name, ..
-    } = server_info;
-    println_safe(format!("ping server {}", &server_name));
-
-    if cm.has_stream(&server_name).await {
-        eprintln!("case 1");
-        init_ping(&server_name).await;
-        return;
-    }
-
-    let ca_cert_path = &CONFIG.me.tls_config_info.ca_cert_path;
-    let retry_delay = CONFIG.retry_delay;
-
-    let client = Client::builder()
-        .with_tls(Path::new(ca_cert_path))
-        .unwrap()
-        .with_io("127.0.0.1:0")
-        .unwrap()
-        .start()
-        .unwrap();
-
-    let server_addr: SocketAddr = addr.parse().unwrap();
-    let connect_config = Connect::new(server_addr).with_server_name(server_name.clone());
-    let mut connection = client.connect(connect_config.clone()).await;
-    let mut expo_factor: u64 = 1;
-    while let Err(_) = connection {
-        eprintln!(
-            "{}: failed to make a connection to {}, {:?}",
-            me(),
-            addr,
-            *cm
-        );
-        // if failed because has it, just send
-        if cm.has_stream(&server_name).await {
-            eprintln!("case 2");
-            init_ping(&server_name).await;
-            return;
-        }
-        let delay: u64 = expo_factor * u64::from(retry_delay);
-        expo_factor <<= 1; // double
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-        connection = client.connect(connect_config.clone()).await;
-    }
-    let mut connection = connection.unwrap();
-
-    connection.keep_alive(true).unwrap();
-
-    let mut stream = connection.open_send_stream().await;
-    expo_factor = 1;
-    while let Err(_) = stream {
-        eprintln!("{}: failed to make a stream to {}\n{:?}", me(), addr, *cm);
-        let delay: u64 = expo_factor * u64::from(retry_delay);
-        expo_factor <<= 1; // double
-        tokio::time::sleep(Duration::from_millis(delay)).await;
-        stream = connection.open_send_stream().await;
-    }
-    let stream = stream.unwrap();
-
-    let res = cm.add_stream(&server_name, stream).await;
-    if let Err(e) = res {
-        eprintln!("{} readd stream {:?}", me(), e)
-    }
-
-    init_ping(&server_name).await;
-}
-
-#[inline]
+/// function that is used to notify the ping pong app of a new sending connection
+#[cfg(feature = "pingpong")]
 async fn init_ping(server_name: &String) {
-    let init_status = APP.lock().await.init_pinger(&server_name).await;
-    if let Err(op_sid) = init_status {
-        eprintln!("init pinger failed, op: {:?}", op_sid);
-        return;
-    }
+    APP.lock().await.init_pinger(&server_name).await;
 }
 
 pub(crate) fn println_safe<'a, T>(what: T)
