@@ -3,6 +3,7 @@ use std::{collections::VecDeque, ops::Deref};
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::{
+    debug_println,
     messages::{Message, MessageContent},
     DELIMITER,
 };
@@ -25,6 +26,12 @@ impl MessageParser {
         }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.message_queue.is_empty()
+    }
+
+    /// function to append data to be parsed into messages, no limit on the data's
+    /// structure, could contain 1, less than 1 or more data than 1 message
     pub(crate) fn append_data(&mut self, data: &Bytes) {
         if !self.buf.is_empty() {
             // some data already needs to be processed before this data
@@ -52,13 +59,13 @@ impl MessageParser {
         }
     }
 
+    // append the data to the internal buffer then attempt to parse as many messages as possible
     fn append_buf(&mut self, data: &Bytes) {
         self.buf.extend(data);
 
         loop {
-            while self.buf.len() > 0 && self.buf[0] == DELIMITER {
-                self.buf.advance(1);
-            }
+            // clean start of buffer
+            self.advance_while_delimiter();
 
             if self.buf.is_empty() {
                 return;
@@ -78,16 +85,36 @@ impl MessageParser {
             // however we should keep trying to read messages
         }
     }
+
+    // advance interior buf while the start of it is delimiter, i.e. end of message/invalid start
+    fn advance_while_delimiter(&mut self) {
+        let mut first_non_delimiter = 0;
+        for byte in self.buf.iter() {
+            if *byte != DELIMITER {
+                break;
+            }
+            first_non_delimiter += 1;
+        }
+        if first_non_delimiter == 0 {
+            return;
+        }
+        self.buf.advance(first_non_delimiter);
+    }
 }
 
+/// message parser is an iterator, not with trait IntoIterator,
+/// it still holds on to its message queue
 impl Iterator for MessageParser {
     type Item = Message;
 
+    /// returns Some(message) if there is a next message
+    /// or None otherwise
     fn next(&mut self) -> Option<Self::Item> {
         self.message_queue.pop_front()
     }
 }
 
+// util to parse a single function
 fn parse_single_message_delimited<'a, T>(single_message_delimited: &'a T) -> Result<Message, ()>
 where
     T: Deref<Target = [u8]>,
@@ -105,6 +132,7 @@ where
     return Ok(message);
 }
 
+/// util to find the index of the first byte in a buffer that equals to a value
 fn index_first_byte_equals<'a, T>(bytes: T, value: u8) -> Option<usize>
 where
     T: IntoIterator<Item = &'a u8>, // Bytes/BytesMut
@@ -119,21 +147,15 @@ where
     return None;
 }
 
+/// util to parse a json message to a Message struct
 fn parse(data: &[u8]) -> Message {
     let json_parse_result: Result<Message, serde_json::Error> = serde_json::from_slice(data);
-    if let Err(x) = &json_parse_result {
-        eprintln!("{:?}, {:?}", x, data);
-    }
-    if let Ok(msg) = json_parse_result {
-        return msg;
-    }
-    // failed to parse message, returns message with invalid
-    eprintln!("******************");
-    eprintln!("INVALID: {:?}", data);
-    eprintln!("******************");
-    Message {
-        content: MessageContent::Invalid,
-        from: String::new(),
-        to: String::new(),
+    match json_parse_result {
+        Ok(message) => message,
+        Err(e) => {
+            #[cfg(debug_assertions)]
+            debug_println(format!("INVALID MESSAGE, err: {:?} data: {:?}", e, data));
+            Message::new(String::new(), String::new(), MessageContent::Invalid)
+        }
     }
 }

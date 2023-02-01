@@ -21,6 +21,7 @@ pub mod messages;
 pub mod timer;
 
 // TODO: pull functions into different modules, try to simplify linkages
+// TODO: documentation + README
 
 // "messages" on stream are separated by delimiter
 static DELIMITER: u8 = 0x0d; // '\r'
@@ -41,16 +42,16 @@ pub fn me() -> &'static String {
 
 pub async fn handle_messages(mut rx: UnboundedReceiver<Message>) {
     while let Some(message) = rx.recv().await {
-        let Message { content, .. } = &message;
+        let content = &message.content;
         if !PingPongApp::handles(content) {
             #[cfg(debug_assertions)]
-            println_safe(format!("{}: ** unhandled ** {:?}", me(), &message));
+            debug_println(format!("{}: ** unhandled ** {:?}", me(), &message));
             continue;
         }
         let result = APP.lock().await.handle(&message);
         if let Err(e) = result {
             #[cfg(debug_assertions)]
-            println_safe(format!("{}: {}", me(), e));
+            debug_println(format!("{}: {}", me(), e));
             continue;
         }
         let result = result.unwrap();
@@ -80,7 +81,7 @@ pub async fn serve(
         tokio::spawn(handle_connection(connection, tx.clone()));
     }
     #[cfg(debug_assertions)]
-    println_safe(format!("{}: closing server", me()));
+    debug_println(format!("{}: closing server", me()));
     Ok(())
 }
 
@@ -102,20 +103,24 @@ async fn listen_and_forward(
     let mut parser = MessageParser::new();
     while let Ok(Some(data)) = stream_receive.receive().await {
         parser.append_data(&data);
-        forward(&mut parser, tx).await;
+        if !parser.is_empty() {
+            forward(&mut parser, tx).await;
+        }
     }
     // end loop, stream closed (error or Ok(None) from stream.receive())
 }
 
+/// forward messages from message queue to channel
 #[inline]
-async fn forward<T>(parser: &mut T, tx: &Mutex<UnboundedSender<Message>>)
+async fn forward<T>(message_iter: &mut T, tx: &Mutex<UnboundedSender<Message>>)
 where
     T: Iterator<Item = Message>,
 {
-    for message in parser {
-        if let Err(e) = tx.lock().await.send(message) {
+    let tx_locked = tx.lock().await;
+    for message in message_iter {
+        if let Err(e) = tx_locked.send(message) {
             #[cfg(debug_assertions)]
-            println_safe(format!("forward error: {}", e));
+            debug_println(format!("forward error: {}", e));
         }
     }
 }
@@ -177,20 +182,14 @@ async fn init_ping(server_name: &String) {
     APP.lock().await.init_pinger(&server_name).await;
 }
 
-pub(crate) fn println_safe<'a, T>(what: T)
+pub(crate) fn debug_println<'a, T>(what: T)
 where
     T: std::fmt::Display,
 {
-    eprint!(
-        "{}",
-        format!(
-            "{:?} {}: {}\n",
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_micros(),
-            me(),
-            what
-        )
-    );
+    let current_time = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_micros();
+    let formatted = format!("{:?} {}: {}\n", current_time, me(), what);
+    eprint!("{}", formatted);
 }

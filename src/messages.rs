@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::app::pingpong::{Ping, Pong};
+use crate::app::pingpong::messages::{Ping, Pong};
 
 #[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub enum MessageContent {
@@ -19,6 +19,12 @@ impl MessageContent {
     }
 }
 
+/// Core message structure being transmitted between nodes
+/// must contain valid from field when sent as receiving streams
+/// are not aware of the sender's identity
+/// content is related to applications
+/// 
+/// nodes are trusted in this environment
 #[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
 pub struct Message {
     pub from: String,

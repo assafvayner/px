@@ -33,8 +33,8 @@ impl Config {
         // skip executable
         args.next();
 
+        // read json config file
         let config_file_path = args.next().unwrap();
-
         let config_file_handle = File::open(Path::new(&config_file_path)).unwrap();
         let config: Config = serde_json::from_reader(config_file_handle).unwrap();
         config

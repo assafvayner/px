@@ -1,3 +1,5 @@
+pub mod messages;
+
 use std::{
     cmp::Ordering,
     collections::{hash_map::Entry, HashMap},
@@ -6,47 +8,20 @@ use std::{
 
 use async_recursion::async_recursion;
 
-use serde::{Deserialize, Serialize};
-
 use crate::{
-    me,
+    debug_println, me,
     messages::{Message, MessageContent},
-    println_safe, send,
+    send,
     timer::timer,
     APP,
 };
+
+use self::messages::{Ping, Pong};
 
 use super::{App, AppError, AppResult};
 
 static PING_DELAY: u64 = 2000;
 static CHECK_DELAY: u64 = 2500;
-
-#[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
-pub struct Ping {
-    pub seqnum: u64,
-    pub message: String,
-}
-
-impl Ping {
-    pub fn new(seqnum: u64, message: String) -> Ping {
-        Ping { seqnum, message }
-    }
-}
-
-#[derive(Debug, Hash, Serialize, Deserialize, Eq, PartialEq, Clone)]
-pub struct Pong {
-    pub seqnum: u64,
-    pub message: String,
-}
-
-impl Pong {
-    pub fn new(seqnum: u64, msg: String) -> Pong {
-        Pong {
-            seqnum,
-            message: msg,
-        }
-    }
-}
 
 pub struct PingPongApp {
     pinging: HashMap<String, u64>,
@@ -75,24 +50,21 @@ impl PingPongApp {
 
     fn process_ping(&mut self, from: &String, ping: &Ping) -> AppResult {
         #[cfg(debug_assertions)]
-        println_safe(format!("proc {:?}", ping));
+        debug_println(format!("proc {:?}", ping));
         let Ping { seqnum, .. } = ping;
         let pong = Pong::new(
             *seqnum,
             String::from(format!("pong seq: {} from: {} to: {}", *seqnum, me(), from)),
         );
-        let message = Message {
-            from: me().clone(),
-            to: from.clone(),
-            content: MessageContent::Pong(pong),
-        };
+        let message = Message::new(me().clone(), from.clone(), MessageContent::Pong(pong));
 
+        // respond with pong immediately
         Ok(Some((message, None)))
     }
 
     fn process_pong(&mut self, from: &String, pong: &Pong) -> AppResult {
         #[cfg(debug_assertions)]
-        println_safe(format!("proc {:?}", pong));
+        debug_println(format!("proc {:?}", pong));
         let Pong { seqnum, .. } = pong;
         let entry = self.pinging.entry(from.clone());
         match entry {
@@ -105,23 +77,23 @@ impl PingPongApp {
                 });
             }
             Entry::Occupied(mut o) => {
-                let val = o.get_mut();
-                match (*val).cmp(seqnum) {
+                let stored_seqnum = o.get_mut();
+                match (*stored_seqnum).cmp(seqnum) {
                     Ordering::Less => {
                         return Err(AppError {
                             error_message: format!(
                                 "ping pong app; seqnum mismatch, expected: <= {}, received: {}.",
-                                *val, seqnum
+                                *stored_seqnum, seqnum
                             ),
                         });
                     }
                     Ordering::Equal => {
                         // this pong has been acknowledged
-                        *val += 1;
+                        *stored_seqnum += 1;
                         /* continue processing */
                     }
                     Ordering::Greater => {
-                        // pong for old seqnum
+                        // pong for old seqnum, no response
                         return Ok(None);
                     }
                 }
@@ -142,13 +114,16 @@ impl PingPongApp {
             content,
         };
 
+        // check that ping was responded to,
+        // ping sent after PING_DELAY, check CHECK_DELAY after that
         timer(
             check_ping_replied(message.clone()),
-            Duration::from_millis(CHECK_DELAY),
+            Duration::from_millis(PING_DELAY + CHECK_DELAY),
         );
 
-        let delay = Some(Duration::from_millis(PING_DELAY));
-        Ok(Some((message, delay)))
+        // respond with new Ping after PING_DELAY
+        let delay = Duration::from_millis(PING_DELAY);
+        Ok(Some((message, Some(delay))))
     }
 }
 
@@ -168,7 +143,7 @@ async fn check_ping_replied(message: Message) {
     }
 
     #[cfg(debug_assertions)]
-    println_safe(format!(
+    debug_println(format!(
         "failed to receive pong for seq: {} from {}",
         ping.seqnum, message.to
     ));

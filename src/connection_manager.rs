@@ -10,17 +10,19 @@ use futures::Future;
 use s2n_quic::{client::Connect, stream::SendStream, Client};
 use tokio::sync::Mutex;
 
-use crate::println_safe;
+use crate::debug_println;
 
-pub type ConnectionManagerMember = Arc<Mutex<SendStream>>;
+// TODO: reintro expo backoff on connection re-establishment
 
-fn new_connection_manager_member(stream: SendStream) -> ConnectionManagerMember {
+pub type ConnectionManagerValue = Arc<Mutex<SendStream>>;
+
+fn new_connection_manager_member(stream: SendStream) -> ConnectionManagerValue {
     Arc::new(Mutex::new(stream))
 }
 
 #[derive(Debug)]
 pub struct ConnectionManager {
-    send_streams: Mutex<HashMap<String, ConnectionManagerMember>>,
+    send_streams: Mutex<HashMap<String, ConnectionManagerValue>>,
 }
 
 impl ConnectionManager {
@@ -34,7 +36,7 @@ impl ConnectionManager {
         &self,
         target: &String,
         stream: SendStream,
-    ) -> Result<(), ConnectionManagerMember> {
+    ) -> Result<(), ConnectionManagerValue> {
         let mut conns = self.send_streams.lock().await;
         let entry = conns.entry(target.clone());
         match entry {
@@ -55,7 +57,7 @@ impl ConnectionManager {
         }
     }
 
-    pub async fn get_stream(&self, target: &String) -> Result<ConnectionManagerMember, ()> {
+    pub async fn get_stream(&self, target: &String) -> Result<ConnectionManagerValue, ()> {
         let conns = self.send_streams.lock().await;
         let result = conns.get(target);
         match result {
@@ -91,7 +93,7 @@ impl ConnectionManager {
             let mut connection = client.connect(connect_config.clone()).await;
             while let Err(e) = connection {
                 #[cfg(debug_assertions)]
-                println_safe(format!("failed to make a connection to {}, {}", addr, e));
+                debug_println(format!("failed to make a connection to {}, {}", addr, e));
                 tokio::time::sleep(Duration::from_millis(retry_delay)).await;
                 connection = client.connect(connect_config.clone()).await;
             }
@@ -102,7 +104,7 @@ impl ConnectionManager {
             let mut stream = connection.open_send_stream().await;
             while let Err(_) = stream {
                 #[cfg(debug_assertions)]
-                println_safe(format!("failed to open send stream to {}", addr));
+                debug_println(format!("failed to open send stream to {}", addr));
                 tokio::time::sleep(Duration::from_millis(retry_delay)).await;
                 stream = connection.open_send_stream().await;
             }
@@ -111,13 +113,13 @@ impl ConnectionManager {
             let res = self.add_stream(server_name, stream).await;
             if let Err(e) = res {
                 #[cfg(debug_assertions)]
-                println_safe(format!("register stream failed, e: {:?}", e));
+                debug_println(format!("register stream failed, e: {:?}", e));
             }
             on_connection_success(server_name).await;
             let res = client.wait_idle().await;
             if let Err(e) = res {
                 #[cfg(debug_assertions)]
-                println_safe(format!("error on idle, {}", e));
+                debug_println(format!("error on idle, {}", e));
 
                 break;
             }
@@ -125,16 +127,21 @@ impl ConnectionManager {
     }
 
     async fn ensure_no_stream(&self, server_name: &String) {
-        if self.has_stream(server_name).await {
-            let res = self.invalidate_stream(server_name).await;
-            if let Err(e) = res {
-                #[cfg(debug_assertions)]
-                println_safe(format!("register stream failed, e: {:?}", e));
-            }
+        if !self.has_stream(server_name).await {
+            return;
+        }
+        let res = self.invalidate_stream(server_name).await;
+        if let Err(_) = res {
+            #[cfg(debug_assertions)]
+            debug_println(format!(
+                "register stream failed, server_name {}",
+                server_name
+            ));
         }
     }
 }
 
+/// util get quic client
 fn get_client(ca_cert_path: &String) -> Client {
     Client::builder()
         .with_tls(Path::new(ca_cert_path))
