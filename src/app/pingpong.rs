@@ -43,7 +43,7 @@ impl PingPongApp {
         // send message if can
         send(&message).await;
         timer(
-            check_ping_replied(message.clone()),
+            check_ping_replied(message),
             Duration::from_millis(CHECK_DELAY),
         );
     }
@@ -163,8 +163,7 @@ impl App for PingPongApp {
 
     fn handles(message_content: &MessageContent) -> bool {
         match message_content {
-            MessageContent::Ping(_) => true,
-            MessageContent::Pong(_) => true,
+            MessageContent::Ping(_) | MessageContent::Pong(_) => true,
             _ => false,
         }
     }

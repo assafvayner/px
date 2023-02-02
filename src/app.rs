@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::messages::{Message, MessageContent};
 
 pub mod pingpong;
+pub mod paxos;
 
 pub type Delay = Option<Duration>;
 pub type AppResult = Result<Option<(Message, Delay)>, AppError>;

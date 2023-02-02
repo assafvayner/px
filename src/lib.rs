@@ -1,5 +1,5 @@
 use app::{pingpong::PingPongApp, App};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::Bytes;
 use config::{Config, ServerInfo};
 use connection_manager::ConnectionManager;
 use message_parser::MessageParser;
@@ -29,6 +29,9 @@ static DELIMITER: u8 = 0x0d; // '\r'
 #[cfg(feature = "pingpong")]
 pub static APP: Lazy<Mutex<PingPongApp>> = Lazy::new(|| Mutex::new(PingPongApp::new()));
 
+#[cfg(feature = "paxos")]
+pub static APP: Lazy<Mutex<PaxosApp>> = Lazy::new(|| Mutex::new(PaxosApp::new()));
+
 pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new(args()));
 
 pub static ME: Lazy<&'static String> = Lazy::new(|| &CONFIG.me.id);
@@ -43,11 +46,21 @@ pub fn me() -> &'static String {
 pub async fn handle_messages(mut rx: UnboundedReceiver<Message>) {
     while let Some(message) = rx.recv().await {
         let content = &message.content;
+
+        #[cfg(feature = "pingpong")]
         if !PingPongApp::handles(content) {
             #[cfg(debug_assertions)]
             debug_println(format!("{}: ** unhandled ** {:?}", me(), &message));
             continue;
         }
+
+        #[cfg(feature = "paxos")]
+        if !PaxosApp::handles(content) {
+            #[cfg(debug_assertions)]
+            debug_println(format!("{}: ** unhandled ** {:?}", me(), &message));
+            continue;
+        }
+
         let result = APP.lock().await.handle(&message);
         if let Err(e) = result {
             #[cfg(debug_assertions)]
@@ -126,16 +139,14 @@ where
 }
 
 pub(crate) async fn send(message: &Message) {
-    let data = serde_json::to_string(message);
-    if let Err(_) = data {
+    let message_serialized_option = serde_json::to_string(message);
+    if let Err(_) = message_serialized_option {
         // parse error
         return;
     }
-    let message_bytes = Bytes::from(data.unwrap());
 
-    let mut mmb = BytesMut::with_capacity(message_bytes.len() + 1);
-    mmb.put(message_bytes);
-    mmb.put_u8(DELIMITER);
+    let mut message_serialized = message_serialized_option.unwrap();
+    message_serialized.push(DELIMITER.into());
 
     let stream = CM.get_stream(&message.to).await;
     if let Err(_) = stream {
@@ -144,7 +155,7 @@ pub(crate) async fn send(message: &Message) {
     }
     let stream = stream.unwrap();
     let mut stream = stream.lock().await;
-    stream.send(mmb.freeze()).await.unwrap();
+    stream.send(Bytes::from(message_serialized)).await.unwrap();
 }
 
 pub(crate) async fn send_owns(message: Message) {
