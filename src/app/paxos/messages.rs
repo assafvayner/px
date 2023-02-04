@@ -1,12 +1,8 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
-pub struct Ballot {
-    pub leader: String,
-    pub number: u64,
-}
+use super::{ballot::Ballot, log::PaxosLog};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosProposeRequest {
@@ -27,7 +23,8 @@ pub struct PaxosProposeReply {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosKnowledgeStateUpdate {
-    pub map: HashMap<String, u64>,
+    pub leader: Ballot,
+    pub map: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
@@ -38,11 +35,11 @@ pub struct PaxosLeaderElectionRequest {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosLeaderElectionReply {
     pub ballot: Ballot,
-    // log
+    pub log: PaxosLog,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosLivenessNotification {
     pub leader: Ballot,
-    // log
+    pub log: PaxosLog,
 }

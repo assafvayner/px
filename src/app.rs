@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use crate::messages::{Message, MessageContent};
 
-pub mod pingpong;
 pub mod paxos;
+pub mod pingpong;
 
 pub type Delay = Option<Duration>;
 pub type AppResult = Result<Option<(Message, Delay)>, AppError>;
@@ -14,7 +14,6 @@ pub enum AppType {
 }
 
 pub trait App {
-    fn new() -> Self;
     fn handles(message: &MessageContent) -> bool;
     fn handle(&mut self, message: &Message) -> AppResult;
 }

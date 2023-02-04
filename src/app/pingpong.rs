@@ -13,8 +13,10 @@ use crate::{
     messages::{Message, MessageContent},
     send,
     timer::timer,
-    APP,
 };
+
+#[cfg(all(feature = "pingpong", not(feature = "paxos")))]
+use crate::APP;
 
 use self::messages::{Ping, Pong};
 
@@ -28,6 +30,12 @@ pub struct PingPongApp {
 }
 
 impl PingPongApp {
+    pub fn new() -> Self {
+        PingPongApp {
+            pinging: HashMap::new(),
+        }
+    }
+
     pub async fn init_pinger(&mut self, to: &String) {
         if self.pinging.contains_key(to) {
             return;
@@ -38,7 +46,7 @@ impl PingPongApp {
             seqnum: 1,
             message: String::from(format!("{} init ping 1", me())),
         };
-        let message = Message::new(me().clone(), to.clone(), MessageContent::Ping(ping));
+        let message = Message::from(me().clone(), to.clone(), MessageContent::Ping(ping));
 
         // send message if can
         send(&message).await;
@@ -56,7 +64,7 @@ impl PingPongApp {
             *seqnum,
             String::from(format!("pong seq: {} from: {} to: {}", *seqnum, me(), from)),
         );
-        let message = Message::new(me().clone(), from.clone(), MessageContent::Pong(pong));
+        let message = Message::from(me().clone(), from.clone(), MessageContent::Pong(pong));
 
         // respond with pong immediately
         Ok(Some((message, None)))
@@ -135,8 +143,15 @@ async fn check_ping_replied(message: Message) {
             return;
         }
     };
+    #[cfg(feature = "pingpong")]
     let ping_pong_app = APP.lock().await;
+
+    #[cfg(feature = "pingpong")]
     let current_seqnum = ping_pong_app.pinging.get(&message.to).unwrap();
+
+    #[cfg(not(feature = "pingpong"))]
+    let current_seqnum: &u64 = &u64::MIN;
+
     if *current_seqnum > ping.seqnum {
         // good case already logged pong
         return;
@@ -155,12 +170,6 @@ async fn check_ping_replied(message: Message) {
 }
 
 impl App for PingPongApp {
-    fn new() -> Self {
-        PingPongApp {
-            pinging: HashMap::new(),
-        }
-    }
-
     fn handles(message_content: &MessageContent) -> bool {
         match message_content {
             MessageContent::Ping(_) | MessageContent::Pong(_) => true,

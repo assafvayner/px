@@ -155,7 +155,7 @@ fn parse(data: &[u8]) -> Message {
         Err(e) => {
             #[cfg(debug_assertions)]
             debug_println(format!("INVALID MESSAGE, err: {:?} data: {:?}", e, data));
-            Message::new(String::new(), String::new(), MessageContent::Invalid)
+            Message::from(String::new(), String::new(), MessageContent::Invalid)
         }
     }
 }

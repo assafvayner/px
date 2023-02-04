@@ -1,4 +1,10 @@
-use app::{pingpong::PingPongApp, App};
+#[cfg(feature = "pingpong")]
+use app::pingpong::PingPongApp;
+
+#[cfg(feature = "paxos")]
+use app::paxos::PaxosApp;
+
+use app::App;
 use bytes::Bytes;
 use config::{Config, ServerInfo};
 use connection_manager::ConnectionManager;
@@ -6,7 +12,7 @@ use message_parser::MessageParser;
 use messages::Message;
 use once_cell::sync::Lazy;
 use s2n_quic::{stream::ReceiveStream, Connection, Server};
-use std::{env::args, error::Error, sync::Arc, time::SystemTime};
+use std::{env::args, sync::Arc, time::SystemTime};
 use timer::timer;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
@@ -26,17 +32,26 @@ pub mod timer;
 // "messages" on stream are separated by delimiter
 static DELIMITER: u8 = 0x0d; // '\r'
 
-#[cfg(feature = "pingpong")]
-pub static APP: Lazy<Mutex<PingPongApp>> = Lazy::new(|| Mutex::new(PingPongApp::new()));
-
-#[cfg(feature = "paxos")]
-pub static APP: Lazy<Mutex<PaxosApp>> = Lazy::new(|| Mutex::new(PaxosApp::new()));
-
 pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new(args()));
 
 pub static ME: Lazy<&'static String> = Lazy::new(|| &CONFIG.me.id);
 
 pub static CM: Lazy<ConnectionManager> = Lazy::new(|| ConnectionManager::new());
+
+#[cfg(all(feature = "pingpong", not(feature = "paxos")))]
+pub static APP: Lazy<Mutex<PingPongApp>> = Lazy::new(|| Mutex::new(PingPongApp::new()));
+
+#[cfg(feature = "paxos")]
+pub static APP: Lazy<Mutex<PaxosApp>> = Lazy::new(|| {
+    let mut servers: Vec<String> = CONFIG
+        .servers
+        .iter()
+        .map(|server_info| server_info.server_name.clone())
+        .collect();
+    servers.push(CONFIG.me.id.clone());
+
+    Mutex::new(PaxosApp::new(servers.into_iter()))
+});
 
 /// helper to get reference to ME string
 pub fn me() -> &'static String {
@@ -47,7 +62,7 @@ pub async fn handle_messages(mut rx: UnboundedReceiver<Message>) {
     while let Some(message) = rx.recv().await {
         let content = &message.content;
 
-        #[cfg(feature = "pingpong")]
+        #[cfg(all(feature = "pingpong", not(feature = "paxos")))]
         if !PingPongApp::handles(content) {
             #[cfg(debug_assertions)]
             debug_println(format!("{}: ** unhandled ** {:?}", me(), &message));
@@ -61,6 +76,7 @@ pub async fn handle_messages(mut rx: UnboundedReceiver<Message>) {
             continue;
         }
 
+        debug_println(&message);
         let result = APP.lock().await.handle(&message);
         if let Err(e) = result {
             #[cfg(debug_assertions)]
@@ -86,16 +102,12 @@ pub async fn handle_messages(mut rx: UnboundedReceiver<Message>) {
     }
 }
 
-pub async fn serve(
-    mut server: Server,
-    tx: Arc<Mutex<UnboundedSender<Message>>>,
-) -> Result<(), Box<dyn Error>> {
+pub async fn serve(mut server: Server, tx: Arc<Mutex<UnboundedSender<Message>>>) {
     while let Some(connection) = server.accept().await {
         tokio::spawn(handle_connection(connection, tx.clone()));
     }
     #[cfg(debug_assertions)]
     debug_println(format!("{}: closing server", me()));
-    Ok(())
 }
 
 pub async fn handle_connection(
@@ -166,11 +178,11 @@ pub async fn start_send_streams() {
     let ca_cert_path = &CONFIG.me.tls_config_info.ca_cert_path;
     let retry_delay = CONFIG.retry_delay;
 
-    #[cfg(feature = "pingpong")]
+    #[cfg(all(feature = "pingpong", not(feature = "paxos")))]
     let on_connection_success = init_ping;
 
     #[cfg(feature = "paxos")]
-    let on_connection_success = todo!();
+    let on_connection_success = init_paxos;
 
     for server_info in &CONFIG.servers {
         let ServerInfo {
@@ -191,6 +203,12 @@ pub async fn start_send_streams() {
 #[cfg(feature = "pingpong")]
 async fn init_ping(server_name: &String) {
     APP.lock().await.init_pinger(&server_name).await;
+}
+
+/// function that is used to notify the paxos app of a new sending connection
+#[cfg(feature = "paxos")]
+async fn init_paxos(_server_name: &String) {
+    APP.lock().await.init().await;
 }
 
 pub(crate) fn debug_println<'a, T>(what: T)

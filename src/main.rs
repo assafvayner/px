@@ -1,8 +1,7 @@
 use px::CONFIG;
 use s2n_quic::server::Server;
-use s2n_quic::stream::Result;
+use std::path::Path;
 use std::sync::Arc;
-use std::{error::Error, path::Path};
 use tokio::sync::{mpsc, Mutex};
 
 use px::config::{ServerConfig, TlsConfigInfo};
@@ -10,7 +9,7 @@ use px::config::{ServerConfig, TlsConfigInfo};
 use px::messages::Message;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() {
     let ServerConfig {
         addr,
         tls_config_info,
@@ -23,9 +22,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     } = tls_config_info;
 
     let server = Server::builder()
-        .with_tls((Path::new(&cert_path), Path::new(&key_path)))?
-        .with_io(addr.as_str())?
-        .start()?;
+        .with_tls((Path::new(&cert_path), Path::new(&key_path)))
+        .unwrap()
+        .with_io(addr.as_str())
+        .unwrap()
+        .start()
+        .unwrap();
 
     // multi sender 1 receiver channel
     let (tx, rx) = mpsc::unbounded_channel::<Message>();
