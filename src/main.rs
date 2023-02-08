@@ -37,5 +37,7 @@ async fn main() {
 
     tokio::spawn(px::start_send_streams());
 
+    tokio::spawn(px::listen_stdin());
+
     px::serve(server, tx).await
 }

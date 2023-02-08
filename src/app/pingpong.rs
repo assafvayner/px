@@ -58,7 +58,7 @@ impl PingPongApp {
 
     fn process_ping(&mut self, from: &String, ping: &Ping) -> AppResult {
         #[cfg(debug_assertions)]
-        debug_println(format!("proc {:?}", ping));
+        // debug_println(format!("proc {:?}", ping));
         let Ping { seqnum, .. } = ping;
         let pong = Pong::new(
             *seqnum,
@@ -72,7 +72,7 @@ impl PingPongApp {
 
     fn process_pong(&mut self, from: &String, pong: &Pong) -> AppResult {
         #[cfg(debug_assertions)]
-        debug_println(format!("proc {:?}", pong));
+        // debug_println(format!("proc {:?}", pong));
         let Pong { seqnum, .. } = pong;
         let entry = self.pinging.entry(from.clone());
         match entry {
@@ -158,10 +158,10 @@ async fn check_ping_replied(message: Message) {
     }
 
     #[cfg(debug_assertions)]
-    debug_println(format!(
-        "failed to receive pong for seq: {} from {}",
-        ping.seqnum, message.to
-    ));
+    // debug_println(format!(
+    //     "failed to receive pong for seq: {} from {}",
+    //     ping.seqnum, message.to
+    // ));
     send(&message).await;
     timer(
         check_ping_replied(message),

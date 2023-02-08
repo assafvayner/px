@@ -39,6 +39,7 @@ pub struct PaxosApp {
     last_leader_liveness_notification_timestamp: SystemTime,
 }
 
+#[cfg(feature = "paxos")]
 impl PaxosApp {
     pub async fn init(&mut self) {
         if self.init {
@@ -281,6 +282,7 @@ impl PaxosApp {
     }
 }
 
+#[cfg(feature = "paxos")]
 impl App for PaxosApp {
     fn handles(message: &MessageContent) -> bool {
         match message {
@@ -322,6 +324,7 @@ impl App for PaxosApp {
     }
 }
 
+#[cfg(feature = "paxos")]
 async fn send_liveness_notifications(timer_leader: Ballot) {
     let mut message = Message::from(me().clone(), String::new(), MessageContent::Invalid);
     #[cfg(feature = "paxos")]
@@ -343,6 +346,7 @@ async fn send_liveness_notifications(timer_leader: Ballot) {
     }
 }
 
+#[cfg(feature = "paxos")]
 async fn broadcast<'a, T: Iterator<Item = &'a String>>(servers: T, message: &mut Message) {
     for server in servers {
         if server.eq(me()) {
@@ -354,6 +358,7 @@ async fn broadcast<'a, T: Iterator<Item = &'a String>>(servers: T, message: &mut
     }
 }
 
+#[cfg(feature = "paxos")]
 #[async_recursion]
 async fn check_leader_live(leader: Ballot) {
     let mut app = APP.lock().await;
@@ -383,6 +388,7 @@ async fn check_leader_live(leader: Ballot) {
     app.init_leader_election().await;
 }
 
+#[cfg(feature = "paxos")]
 #[async_recursion]
 async fn leader_election_check(mut message: Message, ballot: Ballot) {
     let app = APP.lock().await;

@@ -8,29 +8,33 @@ use app::App;
 use bytes::Bytes;
 use config::{Config, ServerInfo};
 use connection_manager::ConnectionManager;
-use message_parser::MessageParser;
 use messages::Message;
 use once_cell::sync::Lazy;
+use parser::{MessageParser, ParseStream, VecParser};
 use s2n_quic::{stream::ReceiveStream, Connection, Server};
 use std::{env::args, sync::Arc, time::SystemTime};
 use timer::timer;
-use tokio::sync::{
-    mpsc::{UnboundedReceiver, UnboundedSender},
-    Mutex,
+use tokio::{
+    io::{stdin, AsyncReadExt},
+    sync::{
+        mpsc::{UnboundedReceiver, UnboundedSender},
+        Mutex,
+    },
 };
 
 pub mod app;
 pub mod config;
 pub mod connection_manager;
-pub mod message_parser;
 pub mod messages;
+pub mod parser;
 pub mod timer;
 
 // TODO: pull functions into different modules, try to simplify linkages
 // TODO: documentation + README
 
 // "messages" on stream are separated by delimiter
-static DELIMITER: u8 = 0x0d; // '\r'
+const DELIMITER: u8 = 0x0d; // '\r'
+const NEWLINE: u8 = 0x0a; // '\n'
 
 pub static CONFIG: Lazy<Config> = Lazy::new(|| Config::new(args()));
 
@@ -125,7 +129,7 @@ async fn listen_and_forward(
     mut stream_receive: ReceiveStream,
     tx: &Mutex<UnboundedSender<Message>>,
 ) {
-    let mut parser = MessageParser::new();
+    let mut parser: ParseStream<Message> = ParseStream::new(MessageParser(), DELIMITER);
     while let Ok(Some(data)) = stream_receive.receive().await {
         parser.append_data(&data);
         if !parser.is_empty() {
@@ -209,6 +213,25 @@ async fn init_ping(server_name: &String) {
 #[cfg(feature = "paxos")]
 async fn init_paxos(_server_name: &String) {
     APP.lock().await.init().await;
+}
+
+pub async fn listen_stdin() {
+    let mut in_handle = stdin();
+    let mut buf: [u8; 1024] = [0; 1024];
+    let mut parser = ParseStream::new(VecParser(), NEWLINE);
+    while let Ok(len) = in_handle.read(&mut buf).await {
+        let bytes = Bytes::copy_from_slice(&mut buf[0..len]);
+        parser.append_data(&bytes);
+        for line in &mut parser {
+            handle_input(line).await;
+        }
+    }
+}
+
+#[inline]
+async fn handle_input(line: Vec<u8>) {
+    // eventually tell paxos app to handle it, for now print it
+    debug_println(format!("line; {:?}", line));
 }
 
 pub(crate) fn debug_println<'a, T>(what: T)
