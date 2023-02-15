@@ -9,7 +9,7 @@ use std::{
 use async_recursion::async_recursion;
 
 use crate::{
-    debug_println, me,
+    me,
     messages::{Message, MessageContent},
     send,
     timer::timer,
@@ -46,7 +46,7 @@ impl PingPongApp {
             seqnum: 1,
             message: String::from(format!("{} init ping 1", me())),
         };
-        let message = Message::from(me().clone(), to.clone(), MessageContent::Ping(ping));
+        let message = Message::new(me().clone(), to.clone(), MessageContent::Ping(ping));
 
         // send message if can
         send(&message).await;
@@ -64,7 +64,7 @@ impl PingPongApp {
             *seqnum,
             String::from(format!("pong seq: {} from: {} to: {}", *seqnum, me(), from)),
         );
-        let message = Message::from(me().clone(), from.clone(), MessageContent::Pong(pong));
+        let message = Message::new(me().clone(), from.clone(), MessageContent::Pong(pong));
 
         // respond with pong immediately
         Ok(Some((message, None)))

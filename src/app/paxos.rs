@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_recursion::async_recursion;
@@ -8,6 +8,7 @@ use crate::messages::{Message, MessageContent};
 use crate::{debug_println, me, send, timer, APP};
 
 use self::ballot::Ballot;
+use self::data::Data;
 use self::log::PaxosLog;
 
 use self::messages::{
@@ -18,24 +19,23 @@ use self::messages::{
 use super::{App, AppError, AppResult};
 
 pub mod ballot;
+pub mod data;
 pub mod log;
 pub mod messages;
 
-static LIVENESS_NOTIFICATION_DELAY: u64 = 5000;
-static LIVENESS_REQUIREMENT_DELAY: u64 = 20000;
-static LEADER_ELECTION_TIMER: u64 = 5000;
+const LIVENESS_NOTIFICATION_DELAY: Duration = Duration::from_millis(25000);
+const LIVENESS_REQUIREMENT_DELAY: Duration = Duration::from_millis(60000);
+const LEADER_ELECTION_TIMER: Duration = Duration::from_millis(5000);
 
-// next TODO: monitor leader heartbeats
-// next TODO: how to trigger leader elections
+// TODO: set propose timer
 
 pub struct PaxosApp {
     init: bool,
-    election_cycle: u64,
+    election_cycle: usize,
     log: PaxosLog,
     leader: Ballot,
     servers: BTreeSet<String>,
     election: Option<BTreeSet<String>>,
-    history: BTreeMap<String, u64>,
     last_leader_liveness_notification_timestamp: SystemTime,
 }
 
@@ -49,27 +49,52 @@ impl PaxosApp {
         self.init_leader_election().await;
     }
 
-    pub fn new<T: Iterator<Item = String>>(servers: T) -> Self {
-        let mut history = BTreeMap::new();
+    pub fn new<'a, T: Iterator<Item = &'a String>>(servers: T) -> Self {
         let mut servers_set: BTreeSet<String> = BTreeSet::new();
         for server in servers {
-            history.insert(server.clone(), 0);
-            servers_set.insert(server);
+            servers_set.insert(server.clone());
         }
         PaxosApp {
             init: false,
             election_cycle: 0,
-            log: PaxosLog::default(),
+            log: PaxosLog::new(servers_set.iter(), servers_set.len()),
             leader: Ballot::default(),
             servers: servers_set,
             election: None,
-            history,
             last_leader_liveness_notification_timestamp: SystemTime::from(UNIX_EPOCH),
         }
     }
 
     pub fn is_leader(&self) -> bool {
         return self.election.eq(&None) && me().eq(&self.leader.leader);
+    }
+
+    pub fn chosen(&self, slot: usize) -> bool {
+        self.log.is_chosen(slot)
+    }
+
+    pub async fn propose(&mut self, raw_data: Vec<u8>) {
+        if !self.is_leader() {
+            return;
+        }
+        let data = Data::new(raw_data);
+        let slot: usize = self.log.new_slot(self.leader.clone(), data.clone());
+        debug_println(format!("{:?}", self.log));
+        let propose_request = PaxosProposeRequest {
+            slot,
+            leader: self.leader.clone(),
+            data,
+        };
+        let mut message = Message::new(
+            me().clone(),
+            String::new(),
+            MessageContent::PaxosProposeRequest(propose_request),
+        );
+        broadcast(self.servers.iter(), &mut message).await;
+        timer(
+            propose_check(message, self.leader.clone(), slot),
+            LEADER_ELECTION_TIMER,
+        );
     }
 
     async fn init_leader_election(&mut self) {
@@ -79,7 +104,7 @@ impl PaxosApp {
         let leader_election_request = PaxosLeaderElectionRequest {
             ballot: self.leader.clone(),
         };
-        let mut message = Message::from(
+        let mut message = Message::new(
             me().clone(),
             String::new(),
             MessageContent::PaxosLeaderElectionRequest(leader_election_request),
@@ -90,7 +115,7 @@ impl PaxosApp {
         broadcast(self.servers.iter(), &mut message).await;
         timer(
             leader_election_check(message, self.leader.clone()),
-            Duration::from_millis(LEADER_ELECTION_TIMER),
+            LEADER_ELECTION_TIMER,
         );
     }
 
@@ -120,14 +145,14 @@ impl PaxosApp {
             self.leader = candidate_ballot.clone();
             timer(
                 check_leader_live(self.leader.clone()),
-                Duration::from_millis(LIVENESS_REQUIREMENT_DELAY),
+                LIVENESS_REQUIREMENT_DELAY,
             );
         }
 
         // send leader election reply with self.{ballot, log}
         // this either affirms choosing new leader or lets sender know
         // there is a better ballot
-        let leader_election_reply = Message::from(
+        let leader_election_reply = Message::new(
             me().clone(),
             from.clone(),
             MessageContent::PaxosLeaderElectionReply(PaxosLeaderElectionReply {
@@ -169,10 +194,10 @@ impl PaxosApp {
             self.leader = ballot.clone();
             timer(
                 check_leader_live(self.leader.clone()),
-                Duration::from_millis(LIVENESS_REQUIREMENT_DELAY),
+                LIVENESS_REQUIREMENT_DELAY,
             );
 
-            let new_leader_election_reply = Message::from(
+            let new_leader_election_reply = Message::new(
                 me().clone(),
                 from.clone(),
                 MessageContent::PaxosLeaderElectionReply(PaxosLeaderElectionReply {
@@ -184,7 +209,8 @@ impl PaxosApp {
         }
 
         // merge logs tbd
-        self.log.merge(&leader_election_reply.log);
+        self.log
+            .merge(&leader_election_reply.log, self.servers.iter());
 
         let election = &mut self.election.as_mut().unwrap();
         election.insert(from.clone());
@@ -228,40 +254,31 @@ impl PaxosApp {
         // not an RPC but update leader on histories
         let knowledge_state_update = PaxosKnowledgeStateUpdate {
             leader: self.leader.clone(),
-            map: self.history.clone(),
+            map: self.log.history.clone(),
         };
 
-        let message = Message::from(
+        let message = Message::new(
             me().clone(),
             from.clone(),
             MessageContent::PaxosKnowledgeStateUpdate(knowledge_state_update),
         );
-        debug_println(format!("proc LN from {}", self.leader));
+        // debug_println(format!("proc LN from {}", self.leader));
         Ok(Some((message, None)))
     }
 
     fn process_knowledge_state_update(
         &mut self,
         knowledge_state_update: &PaxosKnowledgeStateUpdate,
-        from: &String,
+        _from: &String,
     ) -> AppResult {
         // check that we are in the same leader cycle
         if self.leader.ne(&knowledge_state_update.leader) {
             return Ok(None);
         }
         let other_history = &knowledge_state_update.map;
-        for (server, slot_num) in other_history.into_iter() {
-            let server_slot_num_record_option = self.history.get_mut(server);
-            if let None = server_slot_num_record_option {
-                // something wrong!
-                continue;
-            }
-            let server_slot_num_record = server_slot_num_record_option.unwrap();
-            if *server_slot_num_record < *slot_num {
-                *server_slot_num_record = *slot_num;
-            }
-        }
-        debug_println(format!("proc KSU from {}", from));
+        self.log.merge_history(other_history);
+
+        // debug_println(format!("proc KSU from {}", from));
         Ok(None)
     }
 
@@ -270,7 +287,25 @@ impl PaxosApp {
         propose_request: &PaxosProposeRequest,
         from: &String,
     ) -> AppResult {
-        todo!()
+        debug_println(format!(
+            "{:?} {:?} {:?}",
+            propose_request.slot, propose_request.leader, propose_request.data
+        ));
+        if self.leader.leader.ne(from) || self.leader.ne(&propose_request.leader) {
+            return Ok(None);
+        }
+        let reply = self.log.process_propose_request(propose_request);
+        match reply {
+            Some(propose_reply) => Ok(Some((
+                Message::new(
+                    me().clone(),
+                    from.clone(),
+                    MessageContent::PaxosProposeReply(propose_reply),
+                ),
+                None,
+            ))),
+            None => Ok(None),
+        }
     }
 
     fn process_propose_reply(
@@ -278,7 +313,18 @@ impl PaxosApp {
         propose_reply: &PaxosProposeReply,
         from: &String,
     ) -> AppResult {
-        todo!()
+        debug_println(format!(
+            "{:?} {:?} {:?} {:?}",
+            propose_reply.slot, propose_reply.leader, propose_reply.data, propose_reply.chosen
+        ));
+        if !self.is_leader() {
+            return Ok(None);
+        }
+
+        if propose_reply.chosen || self.leader == propose_reply.leader {
+            self.log.process_propose_reply(propose_reply, from);
+        }
+        Ok(None)
     }
 }
 
@@ -326,7 +372,7 @@ impl App for PaxosApp {
 
 #[cfg(feature = "paxos")]
 async fn send_liveness_notifications(timer_leader: Ballot) {
-    let mut message = Message::from(me().clone(), String::new(), MessageContent::Invalid);
+    let mut message = Message::new(me().clone(), String::new(), MessageContent::Invalid);
     #[cfg(feature = "paxos")]
     loop {
         debug_println(format!("send_liveness_notifications {}", timer_leader));
@@ -342,7 +388,7 @@ async fn send_liveness_notifications(timer_leader: Ballot) {
 
         broadcast(app.servers.iter(), &mut message).await;
 
-        tokio::time::sleep(Duration::from_millis(LIVENESS_NOTIFICATION_DELAY)).await;
+        tokio::time::sleep(LIVENESS_NOTIFICATION_DELAY).await;
     }
 }
 
@@ -366,7 +412,7 @@ async fn check_leader_live(leader: Ballot) {
         return;
     }
     let now = SystemTime::now();
-    let duration = Duration::from_millis(LIVENESS_REQUIREMENT_DELAY);
+    let duration = LIVENESS_REQUIREMENT_DELAY;
     if now - duration <= app.last_leader_liveness_notification_timestamp {
         debug_println(format!(
             "check_leader_live {}, OK {:?} <= {:?}",
@@ -400,6 +446,19 @@ async fn leader_election_check(mut message: Message, ballot: Ballot) {
 
     timer(
         leader_election_check(message, ballot),
-        Duration::from_millis(LEADER_ELECTION_TIMER),
+        LEADER_ELECTION_TIMER,
     );
+}
+
+#[cfg(feature = "paxos")]
+#[async_recursion]
+async fn propose_check(mut message: Message, ballot: Ballot, slot: usize) {
+    let app = APP.lock().await;
+    if !app.is_leader() || app.leader.ne(&ballot) || app.log.is_chosen(slot) {
+        return;
+    }
+    debug_println(format!("propose_check rebroadcast"));
+    broadcast(app.servers.iter(), &mut message).await;
+
+    timer(propose_check(message, ballot, slot), LEADER_ELECTION_TIMER);
 }

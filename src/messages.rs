@@ -75,7 +75,7 @@ pub struct Message {
 }
 
 impl Message {
-    pub fn from(from: String, to: String, content: MessageContent) -> Message {
+    pub fn new(from: String, to: String, content: MessageContent) -> Message {
         Message { from, to, content }
     }
 }

@@ -3,12 +3,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Default)]
 pub struct Ballot {
     pub leader: String,
-    pub number: u64,
+    pub number: usize,
 }
 
-// treat ballot with number = u64::MIN as invalid
+// treat ballot with number = usize::MIN as invalid
 impl Ballot {
-    pub(crate) fn new(node: String, number: u64) -> Self {
+    pub(crate) fn new(node: String, number: usize) -> Self {
         Ballot {
             leader: node,
             number,

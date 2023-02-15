@@ -52,12 +52,13 @@ pub static APP: Lazy<Mutex<PaxosApp>> = Lazy::new(|| {
         .iter()
         .map(|server_info| server_info.server_name.clone())
         .collect();
-    servers.push(CONFIG.me.id.clone());
+    servers.push(ME.clone());
 
-    Mutex::new(PaxosApp::new(servers.into_iter()))
+    Mutex::new(PaxosApp::new(servers.iter()))
 });
 
 /// helper to get reference to ME string
+#[inline]
 pub fn me() -> &'static String {
     return &ME;
 }
@@ -231,7 +232,8 @@ pub async fn listen_stdin() {
 #[inline]
 async fn handle_input(line: Vec<u8>) {
     // eventually tell paxos app to handle it, for now print it
-    debug_println(format!("line; {:?}", line));
+    // debug_println(format!("line; {:?}", line));
+    APP.lock().await.propose(line).await;
 }
 
 pub(crate) fn debug_println<'a, T>(what: T)

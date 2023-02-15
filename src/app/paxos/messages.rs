@@ -2,29 +2,27 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::{ballot::Ballot, log::PaxosLog};
+use super::{ballot::Ballot, data::Data, log::PaxosLog};
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosProposeRequest {
-    pub slot: u64,
+    pub slot: usize,
     pub leader: Ballot,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
+    pub data: Data,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosProposeReply {
-    pub slot: u64,
+    pub slot: usize,
     pub leader: Ballot,
-    #[serde(with = "serde_bytes")]
-    pub data: Vec<u8>,
-    pub selected: bool,
+    pub data: Data,
+    pub chosen: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct PaxosKnowledgeStateUpdate {
     pub leader: Ballot,
-    pub map: BTreeMap<String, u64>,
+    pub map: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
